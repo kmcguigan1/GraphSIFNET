@@ -403,6 +403,7 @@ def flatten(img, mapping, n_pixels_per_node, mask=None):
     
     # (n_samples, w, h, c) -> (c, n_samples, w*h)
     img_flattened = torch.moveaxis(img, -1, 0).reshape(c, n_samples, w*h)
+    img_flattened = img_flattened.type(torch.float32)
     
     # Compute mean values for each graph node
     while True:

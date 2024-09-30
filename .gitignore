@@ -2,6 +2,12 @@
 data/
 experiment*/
 
+*.csv
+*.pth
+*.sh
+*.nc
+data_cache/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
