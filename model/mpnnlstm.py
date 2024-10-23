@@ -180,6 +180,18 @@ class MSE_SIP_bin_sep(nn.Module):
         bce_loss = self.bce(output[..., [1]], target, mask, weights) * 0.1
         loss = mse_loss + bce_loss
         return loss
+    
+class MSE_SIP_bin_sep_conv(nn.Module):
+    def __init__(self):
+        super(MSE_SIP_bin_sep_conv, self).__init__()
+        self.mse = MSE_SIP()
+        self.bce = BCE()
+        
+    def forward(self, output, target):
+        mse_loss = self.mse(output[:, [0], ...], target)
+        bce_loss = self.bce(output[:, [1], ...], target) * 0.1
+        loss = mse_loss + bce_loss
+        return loss
 
 
 class NextFramePredictor(ABC):
@@ -389,6 +401,7 @@ class NextFramePredictorS2S(NextFramePredictor):
             self.model.train()
             self.model.epoch = epoch
             for x, y, launch_date in tqdm(loader_train, leave=True):
+                print(f"x: {x.shape} y: {y.shape}")
 
                 x, y = x.squeeze(0).to(self.device), y.squeeze(0).to(self.device)
                 
@@ -396,6 +409,10 @@ class NextFramePredictorS2S(NextFramePredictor):
                     concat_layers = self.get_climatology_array(climatology, launch_date)
                 else:
                     concat_layers = None
+
+                # concat_layers = rearrange(concat_layers, "t h w (b c) -> b c t h w", b=1, t=concat_layers.size(0), h=image_shape[0], w=image_shape[1], c=1)
+
+                # print("climatology: ", concat_layers.shape)
                 
                 # Single-step forward/backward pass if no truncated backpropogation, otherwise split into truncated_backprop chunks
                 if truncated_backprop == 0:
@@ -639,5 +656,316 @@ class NextFramePredictorS2S(NextFramePredictor):
             
         return np.stack(y_pred, 0)
 
+    def score(self, x, y, rollout=None):
+        pass
+
+
+
+from model.seq2seq import ConvLSTM
+from einops import rearrange
+
+class NextFramePredictorConvLSTM(NextFramePredictor):
+    def __init__(self,
+                 thresh=-np.inf,
+                 experiment_name='experiment', 
+                 directory='',
+                 decompose=True, 
+                 input_features=1,
+                 input_timesteps=3,
+                 output_timesteps=3,
+                 device=None,
+                 transform_func=None,
+                 condition='max_larger_than',
+                 remesh_input=False,
+                 binary=False,
+                 debug=False,
+                 model_kwargs={}):
+        
+        super().__init__(
+                 thresh=thresh,
+                 experiment_name=experiment_name, 
+                 decompose=decompose, 
+                 input_features=input_features,
+                 device=device,
+                 transform_func=transform_func,
+                 condition=condition)
+        
+        # Model parameters
+        self.input_timesteps = input_timesteps
+        self.output_timesteps = output_timesteps
+        self.input_features = input_features 
+        self.binary = binary
+
+        self.experiment_name = experiment_name
+        self.directory = directory
+        self.debug = debug
+        self.device = device
+        
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+        
+        # Model 
+        self.model = ConvLSTM(
+            input_features=input_features + 2,  # Add 3 for the positional encoding (x, y) and node size features
+            input_timesteps=input_timesteps,
+            output_timesteps=output_timesteps,
+            device=device,
+            binary=binary,
+            **model_kwargs
+        ).to(device)
+
+        # To allow calling train() multiple times
+        self.training_initiated = False
+
+    def get_n_params(self):
+        return get_n_params(self.model)
+
+    def save(self):
+        torch.save(self.model.state_dict(), os.path.join(self.directory, f'{self.experiment_name}.pth'))
+
+    def load(self, directory):
+        try:
+            self.model.load_state_dict(torch.load(os.path.join(directory, f'{self.experiment_name}.pth')))
+        except:
+            self.model.load_state_dict(torch.load(os.path.join(directory, f'{self.experiment_name}.pth'), map_location=torch.device('cpu')))
+
+    def initiate_training(self, lr, lr_decay, mask):
+        # self.loss_func = MSE_SIP_bin_sep() if not self.binary else torch.nn.BCELoss()
+        self.loss_func = MSE_SIP_bin_sep_conv()
+        self.loss_func_name = 'MSE_SIP_bin_sep_conv'
+        # self.loss_func_name = 'MSE_SSIM' if not self.binary else 'BCE'  # For printing
+        
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)#, weight_decay=0.001)
+        self.scheduler = StepLR(self.optimizer, step_size=3, gamma=lr_decay)
+
+        self.scaler = amp.GradScaler()  # Not used 
+        
+        self.writer = SummaryWriter('runs/' + self.experiment_name + '_' + datetime.datetime.now().strftime("%Y%m%d_%H_%M_%S"))
+
+        self.test_loss = []
+        self.train_loss = []
+
+        self.training_initiated = True
+        
+        self.min_loss = np.inf
+    
+    # @profile
+    def train(
+        self,
+        loader_train,
+        loader_test,
+        climatology=None,
+        climatology_test=None,
+        n_epochs=200,
+        lr=0.01,
+        lr_decay=0.95,
+        mask=None,
+        high_interest_region=None,
+        truncated_backprop=45,
+        graph_structure=None,
+        graph_structure_test=None,
+        ):
+        batch_size = 1
+        image_shape = loader_train.dataset.image_shape
+        
+        # Initialize training only if it's the first train() call
+        if not self.training_initiated:
+            self.initiate_training(lr, lr_decay, mask)
+
+        # if mask is not None:
+            # assert mask.shape == image_shape, f'Mask and image shapes do not match. Got {mask.shape} and {image_shape}'
+
+        # Training loop
+        st = time.time()
+        batch_step = 0
+        batch_step_test = 0
+        for epoch in range(n_epochs): 
+
+            # Loop over training set
+            running_loss = 0
+            step = 0
+            
+            self.model.train()
+            self.model.epoch = epoch
+            for x, y, launch_date in tqdm(loader_train, leave=True):
+                # x, y = x.squeeze(dim=0), y.squeeze(dim=0)
+                x = x.type(torch.float32)
+                y = y.type(torch.float32)
+                x, y = x.to(self.device), y.to(self.device)
+                
+                if climatology is not None:
+                    concat_layers = self.get_climatology_array(climatology, launch_date)
+                    concat_layers = concat_layers.type(torch.float32)
+                else:
+                    concat_layers = None
+                
+                x = rearrange(x, "b t h w c -> b c t h w", b=1, t=x.size(1), h=image_shape[0], w=image_shape[1], c=x.size(-1))
+                y = rearrange(y, "b t h w c -> b c t h w", b=1, t=y.size(1), h=image_shape[0], w=image_shape[1], c=y.size(-1))
+                concat_layers = rearrange(concat_layers, "t h w (b c) -> b c t h w", b=1, t=concat_layers.size(0), h=image_shape[0], w=image_shape[1], c=1)
+
+                # print("")
+                # print(f"x: {x.shape} y: {y.shape}")
+                # print("climateology: ", concat_layers.shape)
+
+                # Single-step forward/backward pass if no truncated backpropogation, otherwise split into truncated_backprop chunks
+                if truncated_backprop == 0:
+                    self.optimizer.zero_grad()
+                
+                   
+                    y_hat = self.model(x, concat_layers)
+                    # print(f"y_hat: {y_hat.shape}")
+
+
+                    loss = self.loss_func(y_hat, y)  
+                    
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=10)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+
+                    if self.debug:
+                        en_grad_norms = torch.norm(torch.stack([torch.norm(param.grad.detach()) for param in self.model.encoder.parameters() if param.grad is not None]))
+                        de_grad_norms = torch.norm(torch.stack([torch.norm(param.grad.detach()) for param in self.model.decoder.parameters() if param.grad is not None]))
+                        self.writer.add_scalar("Grad/encoder/grad_norms", en_grad_norms, batch_step)
+                        self.writer.add_scalar("Grad/decoder/grad_norms", de_grad_norms, batch_step)
+
+                    del y_hat
+                    # del y_hat_mappings
+
+                else:
+                    raise NotImplementedError('')
+
+                self.writer.add_scalar("Loss/train", loss.item(), batch_step)
+
+                step += 1
+                batch_step += 1
+                running_loss += loss.item()
+                torch.cuda.empty_cache()
+
+            # Loop over test set
+            running_loss_test = 0
+            step_test = 0
+            self.model.eval()
+            for x, y, launch_date in tqdm(loader_test, leave=True):
+
+                x = x.type(torch.float32)
+                y = y.type(torch.float32)
+                x, y = x.to(self.device), y.to(self.device)
+                
+                if climatology is not None:
+                    concat_layers = self.get_climatology_array(climatology, launch_date)
+                    concat_layers = concat_layers.type(torch.float32)
+                else:
+                    concat_layers = None
+                
+                x = rearrange(x, "b t h w c -> b c t h w", b=1, t=x.size(1), h=image_shape[0], w=image_shape[1], c=x.size(-1))
+                y = rearrange(y, "b t h w c -> b c t h w", b=1, t=y.size(1), h=image_shape[0], w=image_shape[1], c=y.size(-1))
+                concat_layers = rearrange(concat_layers, "t h w (b c) -> b c t h w", b=1, t=concat_layers.size(0), h=image_shape[0], w=image_shape[1], c=1)
+
+                # print("")
+                # print(f"x: {x.shape} y: {y.shape}")
+                # print("climateology: ", concat_layers.shape)
+
+                y_hat = self.model(x, concat_layers)
+                # print(f"y_hat: {y_hat.shape}")
+
+                loss = self.loss_func(y_hat, y)  
+
+                step_test += 1
+                running_loss_test += loss
+
+                del y_hat
+                torch.cuda.empty_cache()
+
+
+            running_loss = running_loss / (step + 1)
+            running_loss_test = running_loss_test / (step_test + 1)
+            
+            if running_loss_test < self.min_loss:
+                self.save()
+                self.min_loss = running_loss_test
+
+            if np.isnan(running_loss_test.item()):
+                raise ValueError('NaN loss :(')
+
+            # if running_loss_test.item() > 4:
+            #     raise ValueError('Diverged :(')
+
+            self.writer.add_scalar("Loss/test", running_loss_test.item(), epoch)
+
+            self.scheduler.step()
+
+            self.train_loss.append(running_loss)
+            self.test_loss.append(running_loss_test.item())
+            
+            print(f"{self.experiment_name} | Epoch {epoch} train {self.loss_func_name}: {running_loss:.4f}, "+ \
+                f"test {self.loss_func_name}: {running_loss_test.item():.4f}, lr: {self.scheduler.get_last_lr()[0]:.4f}, time_per_epoch: {(time.time() - st) / (epoch+1):.1f}")
+        
+        print(f'Finished in {(time.time() - st)/60} minutes')
+        
+        self.writer.flush()
+
+        self.loss = pd.DataFrame({
+            'train_loss': self.train_loss,
+            'test_loss': self.test_loss,
+
+        })
+
+    def get_climatology_array(self, climatology, launch_date):
+        """
+        Get the daily climate normals for each day of the year in the output timesteps
+
+        climatology (np.ndarray): Climate normals tensor of shape (365, w, h)
+        launch_date (np.datetime64 (?)): The launch date
+        """
+        doys = [int_to_datetime(launch_date.numpy()[0] + 8.640e13 * t).timetuple().tm_yday - 1 for t in range(1, self.output_timesteps+1)]
+
+        out = climatology[:, doys, ...]
+        out = torch.moveaxis(out, 0, -1)
+        return out
+        
+    def predict(self, loader, climatology=None, mask=None, high_interest_region=None, graph_structure=None):
+        """
+        Use model in inference mode.
+        """
+        
+        image_shape = loader.dataset.image_shape
+            
+        self.model.to(self.device)
+        
+        y_pred = []
+        for x, y, launch_date in tqdm(loader, leave=False):
+
+            x = x.type(torch.float32)
+            y = y.type(torch.float32)
+            x, y = x.to(self.device), y.to(self.device)
+            
+            if climatology is not None:
+                concat_layers = self.get_climatology_array(climatology, launch_date)
+                concat_layers = concat_layers.type(torch.float32)
+            else:
+                concat_layers = None
+            
+            x = rearrange(x, "b t h w c -> b c t h w", b=1, t=x.size(1), h=image_shape[0], w=image_shape[1], c=x.size(-1))
+            y = rearrange(y, "b t h w c -> b c t h w", b=1, t=y.size(1), h=image_shape[0], w=image_shape[1], c=y.size(-1))
+            concat_layers = rearrange(concat_layers, "t h w (b c) -> b c t h w", b=1, t=concat_layers.size(0), h=image_shape[0], w=image_shape[1], c=1)
+
+            # print("")
+            # print(f"x: {x.shape} y: {y.shape}")
+            # print("climateology: ", concat_layers.shape)
+
+            y_hat = self.model(x, concat_layers)
+            # print(f"y_hat: {y_hat.shape}")
+
+            y_hat = y_hat.detach().cpu()
+
+            y_pred.append(y_hat)
+            torch.cuda.empty_cache()
+            
+        y_pred = np.stack(y_pred, 0)
+        # print(y_pred.shape)
+        return y_pred
+    
     def score(self, x, y, rollout=None):
         pass

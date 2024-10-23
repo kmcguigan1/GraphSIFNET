@@ -59,6 +59,7 @@ class Encoder(torch.nn.Module):
         self.norm_c = nn.LayerNorm(hidden_size)
         
     def forward(self, X, edge_index, edge_weight, H=None, C=None):
+        print(f"Encoder -> x: {X.shape}")
 
         if self.dummy:
             return H, C
@@ -162,6 +163,8 @@ class Decoder(torch.nn.Module):
         
     def forward(self, X, edge_index, edge_weight, concat_layers, y_initial, H, C):
 
+        print(f"Decoder -> x: {X.shape}, clim: {concat_layers.shape} y_init: {y_initial.shape}")
+
         if self.dummy:
             if concat_layers is not None:
                 X = torch.cat([X, concat_layers], dim=-1)
@@ -226,6 +229,8 @@ class Decoder(torch.nn.Module):
 
         if self.binary:
             output = torch.sigmoid(output)
+
+        print(f"Decoder output size: {output.shape}")
 
         return output, hidden, cell
 
@@ -401,6 +406,8 @@ class Seq2Seq(torch.nn.Module):
         self.graph.n_pixels_per_node = graph_structure['n_pixels_per_node']
         self.graph.image_shape = self.image_shape
         self.graph.pyg.to(self.device)
+
+        print(f"Process inputs -> x: {self.graph.pyg.x.shape}")
         
         # Encoder ------------------------------------------------------------------------------------------------------------
         self.graph.hidden, self.graph.cell = None, None
@@ -434,6 +441,7 @@ class Seq2Seq(torch.nn.Module):
         
         # First input to the decoder is the last input to the encoder 
         self.graph.pyg.x = self.graph.pyg.x[-1, :, [0, -3, -2, -1]]  # Node size
+        print(f"Process inputs decoder inputs -> x: {self.graph.pyg.x.shape}")
         
         # Add SIP and reorder as [SIC, SIP, x, y, node_size]  # MULTITASK
         if self.multitask:
@@ -441,6 +449,7 @@ class Seq2Seq(torch.nn.Module):
             self.graph.pyg.x = self.graph.pyg.x[:, [1, 0, 2, 3, 4]]
         
         # self.graph.pyg.x = self.graph.pyg.x[-1, :, [0, -2, -1]]
+        print(f"Process inputs decoder inputs -> x: {self.graph.pyg.x.shape}")
 
 
     def unroll_output(self, unroll_steps, y, concat_layers=None, teacher_forcing_ratio=0.5, mask=None, high_interest_region=None, remesh_every=1):
@@ -653,4 +662,111 @@ class Seq2Seq(torch.nn.Module):
         self.graph.cell = cell
 
         self.graph.image_shape = image_shape
+
+
+class ConvLSTMCell(nn.Module):
+    def __init__(self, in_dims, hidden_dims, kernel_size=5):
+        super().__init__()
+        self.hidden = hidden_dims
+
+        self.ix = nn.Conv2d(in_dims, hidden_dims, kernel_size, padding="same", bias=True)
+        self.ih = nn.Conv2d(hidden_dims, hidden_dims, kernel_size, padding="same", bias=False)
+        self.ic = nn.Conv2d(hidden_dims, hidden_dims, 1, padding="same", bias=False)
+
+        self.fx = nn.Conv2d(in_dims, hidden_dims, kernel_size, padding="same", bias=True)
+        self.fh = nn.Conv2d(hidden_dims, hidden_dims, kernel_size, padding="same", bias=False)
+        self.fc = nn.Conv2d(hidden_dims, hidden_dims, 1, padding="same", bias=False)
+
+        self.ox = nn.Conv2d(in_dims, hidden_dims, kernel_size, padding="same", bias=True)
+        self.oh = nn.Conv2d(hidden_dims, hidden_dims, kernel_size, padding="same", bias=False)
+        self.oc = nn.Conv2d(hidden_dims, hidden_dims, 1, padding="same", bias=False)
+
+        self.cx = nn.Conv2d(in_dims, hidden_dims, kernel_size, padding="same", bias=True)
+        self.ch = nn.Conv2d(hidden_dims, hidden_dims, kernel_size, padding="same", bias=False)
+
+    def init_states(self, B, H, W, device, dtype):
+        self.h = torch.zeros(B, self.hidden, H, W, device=device, dtype=dtype)
+        self.c = torch.zeros(B, self.hidden, H, W, device=device, dtype=dtype)
+
+    def get_states(self):
+        return self.h, self.c
+    
+    def update_states(self, h, c):
+        self.h, self.c = self.h.clone(), self.c.clone()
+        self.h, self.c = h, c
+
+    def forward(self, x):
+        h, c = self.get_states()
+        igate = F.sigmoid(self.ix(x) + self.ih(h) + self.ic(c))
+        fgate = F.sigmoid(self.fx(x) + self.fh(h) + self.fc(c))
+
+        context = F.tanh(self.cx(x) + self.ch(h))
+        c_new = fgate * c + igate * context
+        
+        ogate = F.sigmoid(self.ox(x) + self.oh(h) + self.oc(c_new))
+        h_new = ogate * F.tanh(c_new)
+        
+        self.update_states(h_new, c_new)
+        return h_new
+
+class ConvLSTM(torch.nn.Module):
+    def __init__(
+        self, hidden_size, input_timesteps=3, input_features=4, output_timesteps=5,
+        n_layers=4, binary=False, device=None, debug=False, multitask=True
+    ):
+        super().__init__()
+        assert binary == False
+        self.input_timesteps = input_timesteps
+        self.output_timesteps = output_timesteps
+        self.n_layers = n_layers
+        self.debug = debug
+        self.multitask = multitask
+        self.device = device
+        self.binary = binary
+
+        self.encoders = nn.ModuleList([])
+        for idx in range(n_layers):
+            self.encoders.append(ConvLSTMCell(
+                in_dims=input_features if idx == 0 else hidden_size,
+                hidden_dims=hidden_size
+            ))
+        self.decoders = nn.ModuleList([])
+        for idx in range(n_layers):
+            self.decoders.append(ConvLSTMCell(
+                in_dims=hidden_size if idx > 0 else 3,
+                hidden_dims=hidden_size
+            ))
+        self.out = nn.Conv2d(hidden_size, 2, kernel_size=3, padding="same")
+
+    def forward(self, x, concat_layers):
+        B, C, T, H, W = x.shape
+        for layer in self.encoders:
+            layer.init_states(B, H, W, x.device, x.dtype)
+        for layer in self.decoders:
+            layer.init_states(B, H, W, x.device, x.dtype)
+
+        for idx in range(T):
+            z = x[:, :, idx, ...]
+            for layer in self.encoders:
+                z = layer(z)
+        
+        for idx in range(len(self.encoders)):
+            self.decoders[idx].update_states(*self.encoders[idx].get_states())
+
+        predictions = torch.zeros(B, 2, self.output_timesteps, H, W, device=x.device, dtype=x.dtype)
+        last_sic = x[:, :1, -1, ...]
+        last_sip = (last_sic[...] > 0.15).float()
+        z = torch.cat((last_sic, last_sip), dim=1)
+        for idx in range(self.output_timesteps):
+            z = torch.cat((z, concat_layers[:, :, idx, ...]), dim=1)
+            for layer in self.decoders:
+                z = layer(z)
+            z = self.out(z)
+
+            z = F.sigmoid(z)
+            predictions[:, :, idx, ...] = z
+
+        return predictions
+
+
     

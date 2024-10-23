@@ -9,9 +9,9 @@ import argparse
 import logging
 
 from model.utils import int_to_datetime
-from model.mpnnlstm import NextFramePredictorS2S
+from model.mpnnlstm import NextFramePredictorS2S, NextFramePredictorConvLSTM
 from torch.utils.data import DataLoader
-from ice_dataset import IceDataset
+from ice_dataset import IceDataset, IceDatasetConvLSTM
 from model.graph_functions import (
     create_static_heterogeneous_graph, 
     create_static_homogeneous_graph,
@@ -19,17 +19,25 @@ from model.graph_functions import (
     unflatten
 )
 
+CONV_LSTM = True
+from einops import rearrange
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger()
 
-def create_datasets(ds, train_years, month, input_timesteps, output_timesteps, x_vars, y_vars, graph_structure, mask, cache_dir):
+def create_datasets(ds, train_years, month, input_timesteps, output_timesteps, x_vars, y_vars, mask):
     val_years = [train_years[-1] + 1]
     test_years = [train_years[-1] + 2]
     
-    data_train = IceDataset(ds, train_years, month, input_timesteps, output_timesteps, x_vars, y_vars, train=True, graph_structure=graph_structure, mask=mask, cache_dir=cache_dir)
-    data_val = IceDataset(ds, val_years, month, input_timesteps, output_timesteps, x_vars, y_vars, graph_structure=graph_structure, mask=mask, cache_dir=cache_dir)
-    data_test = IceDataset(ds, test_years, month, input_timesteps, output_timesteps, x_vars, y_vars, graph_structure=graph_structure, mask=mask, cache_dir=cache_dir, flatten_y=False)
+    if not CONV_LSTM:
+        data_train = IceDataset(ds, train_years, month, input_timesteps, output_timesteps, x_vars, y_vars, train=True, graph_structure=graph_structure, mask=mask, cache_dir=cache_dir)
+        data_val = IceDataset(ds, val_years, month, input_timesteps, output_timesteps, x_vars, y_vars, graph_structure=graph_structure, mask=mask, cache_dir=cache_dir)
+        data_test = IceDataset(ds, test_years, month, input_timesteps, output_timesteps, x_vars, y_vars, graph_structure=graph_structure, mask=mask, cache_dir=cache_dir, flatten_y=False)
+    else:
+        data_train = IceDatasetConvLSTM(ds, train_years, month, input_timesteps, output_timesteps, x_vars, y_vars, train=True, mask=mask)
+        data_val = IceDatasetConvLSTM(ds, val_years, month, input_timesteps, output_timesteps, x_vars, y_vars, mask=mask)
+        data_test = IceDatasetConvLSTM(ds, test_years, month, input_timesteps, output_timesteps, x_vars, y_vars, mask=mask)
 
     loader_train = DataLoader(data_train, batch_size=1, shuffle=True)
     loader_val = DataLoader(data_val, batch_size=1, shuffle=True)
@@ -66,15 +74,15 @@ if __name__ == '__main__':
     # parser.add_argument('--rnn_type', nargs='?', default='NoConvLSTM', type=str)
 
     parser.add_argument('--month', nargs='?', default=5, type=int)
-    parser.add_argument('--n_epochs_init', nargs='?', default=1, type=int)
-    parser.add_argument('--n_epochs_retrain', nargs='?', default=1, type=int)
-    parser.add_argument('--hidden_size', nargs='?', default=4, type=int)
-    parser.add_argument('--n_conv', nargs='?', default=1, type=int)
+    parser.add_argument('--n_epochs_init', nargs='?', default=30, type=int)
+    parser.add_argument('--n_epochs_retrain', nargs='?', default=10, type=int)
+    parser.add_argument('--hidden_size', nargs='?', default=32, type=int)
+    parser.add_argument('--n_conv', nargs='?', default=2, type=int)
     parser.add_argument('--input_timesteps', nargs='?', default=10, type=int)
     parser.add_argument('--output_timesteps', nargs='?', default=90, type=int)
-    parser.add_argument('--mesh_size', nargs='?', default=4, type=int)
+    parser.add_argument('--mesh_size', nargs='?', default=1, type=int)
     parser.add_argument('--mesh_type', nargs='?', default='homogeneous', type=str)
-    parser.add_argument('--conv_type', nargs='?', default='GCNConv', type=str)
+    parser.add_argument('--conv_type', nargs='?', default='TransformerConv', type=str)
     parser.add_argument('--directory', nargs='?', default='experiment', type=str)
     parser.add_argument('--rnn_type', nargs='?', default='NoConvLSTM', type=str)
     
@@ -106,9 +114,10 @@ if __name__ == '__main__':
     # rnn_type = 'NoConvLSTM'  # LSTM, GRU, 
     rnn_type = args['rnn_type']
     
-    cache_dir = '/home/kmcguiga/projects/def-sirisha/kmcguiga/GraphSIFNET/data_cache'
+    # cache_dir = '/home/kmcguiga/projects/def-sirisha/kmcguiga/GraphSIFNET/data_cache'
+    cache_dir = None
     
-    test = True
+    test = False
     
     if test:
         cache_dir = None
@@ -128,42 +137,67 @@ if __name__ == '__main__':
     image_shape = mask.shape
 
     logger.info("Creating graph structure")
-    if mesh_type == 'heterogeneous':
-        graph_structure = create_static_heterogeneous_graph(image_shape, mesh_size, mask, use_edge_attrs=use_edge_attrs, resolution=1/12, device=device)
-    elif mesh_type == 'homogeneous':
-        graph_structure = create_static_homogeneous_graph(image_shape, mesh_size, mask, use_edge_attrs=use_edge_attrs, resolution=1/12, device=device)
+    graph_structure = None
+
+    if not CONV_LSTM:
+        if mesh_type == 'heterogeneous':
+            graph_structure = create_static_heterogeneous_graph(image_shape, mesh_size, mask, use_edge_attrs=use_edge_attrs, resolution=1/12, device=device)
+        elif mesh_type == 'homogeneous':
+            graph_structure = create_static_homogeneous_graph(image_shape, mesh_size, mask, use_edge_attrs=use_edge_attrs, resolution=1/12, device=device)
 
     climatology = ds[y_vars].fillna(0).groupby('time.dayofyear').mean('time', skipna=True).to_array().values
     climatology = torch.tensor(np.nan_to_num(climatology)).to(device)
     climatology = torch.moveaxis(climatology, 0, -1)
-    climatology = flatten(climatology, graph_structure['mapping'], graph_structure['n_pixels_per_node'])
+    if not CONV_LSTM:
+        climatology = flatten(climatology, graph_structure['mapping'], graph_structure['n_pixels_per_node'])
     climatology = torch.moveaxis(climatology, -1, 0)
+    # print("clim shape")
+    # print(climatology.shape)
 
     # Arguments passed to Seq2Seq constructor
-    model_kwargs = dict(
-        hidden_size=hidden_size,
-        dropout=0.1,
-        n_layers=1,
-        dummy=False,
-        n_conv=n_conv,
-        rnn_type=rnn_type,
-        conv_type=conv_type,
-    )
-    
+    if not CONV_LSTM:
+        model_kwargs = dict(
+            hidden_size=hidden_size,
+            dropout=0.1,
+            n_layers=1,
+            dummy=False,
+            n_conv=n_conv,
+            rnn_type=rnn_type,
+            conv_type=conv_type,
+        )
+    else:
+        model_kwargs = dict(
+            hidden_size=hidden_size,
+            n_layers=n_conv,
+        )
+
     experiment_name = 'experiment'
     logger.info(f'Experiment name: {experiment_name}')
     
     logger.info("Initializing model")
-    model = NextFramePredictorS2S(
-        experiment_name=experiment_name,
-        directory=directory,
-        input_features=input_features,
-        input_timesteps=input_timesteps,
-        output_timesteps=output_timesteps,
-        device=device,
-        binary=binary,
-        debug=False, 
-        model_kwargs=model_kwargs)
+    if not CONV_LSTM:
+        model = NextFramePredictorS2S(
+            experiment_name=experiment_name,
+            directory=directory,
+            input_features=input_features,
+            input_timesteps=input_timesteps,
+            output_timesteps=output_timesteps,
+            device=device,
+            binary=binary,
+            debug=False, 
+            model_kwargs=model_kwargs)
+    else:
+        model = NextFramePredictorConvLSTM(
+            experiment_name=experiment_name,
+            directory=directory,
+            input_features=input_features,
+            input_timesteps=input_timesteps,
+            output_timesteps=output_timesteps,
+            device=device,
+            binary=binary,
+            debug=False, 
+            model_kwargs=model_kwargs)
+
 
     logger.info(f'Num. parameters: {model.get_n_params()}')
 
@@ -173,22 +207,34 @@ if __name__ == '__main__':
     while test_year < 2021:
         
         logger.info(f'Creating datasets for {train_years}')
-        loader_train, loader_val, loader_test = create_datasets(ds, train_years, month, input_timesteps, output_timesteps, x_vars, y_vars, graph_structure, mask, cache_dir)
+        # loader_train, loader_val, loader_test = create_datasets(ds, train_years, month, input_timesteps, output_timesteps, x_vars, y_vars, graph_structure, mask, cache_dir)
+        loader_train, loader_val, loader_test = create_datasets(ds, train_years, month, input_timesteps, output_timesteps, x_vars, y_vars, mask)
 
         logger.info("Training")
         model.model.train()
 
         logger.info("Starting training")
-        model.train(
-            loader_train,
-            loader_val,
-            climatology,
-            lr=lr,
-            n_epochs=n_epochs,
-            mask=mask,
-            truncated_backprop=truncated_backprop,
-            graph_structure=graph_structure,
-        )
+        if not CONV_LSTM:
+            model.train(
+                loader_train,
+                loader_val,
+                climatology,
+                lr=lr,
+                n_epochs=n_epochs,
+                mask=mask,
+                truncated_backprop=truncated_backprop,
+                graph_structure=graph_structure
+            )
+        else:
+            model.train(
+                loader_train,
+                loader_val,
+                climatology,
+                lr=lr,
+                n_epochs=n_epochs,
+                mask=mask,
+                truncated_backprop=truncated_backprop,
+            )
 
         logger.info("Saving training loss")
         model.loss.to_csv(f'{directory}/loss_{experiment_name}_{test_year}.csv')
@@ -197,12 +243,19 @@ if __name__ == '__main__':
         # Generate predictions
         logger.info("Generating predictions")
         model.model.eval()
-        test_preds = model.predict(
-            loader_test,
-            climatology,
-            mask=mask,
-            graph_structure=graph_structure
-        )
+        if not CONV_LSTM:
+            test_preds = model.predict(
+                loader_test,
+                climatology,
+                mask=mask,
+                graph_structure=graph_structure
+            )
+        else:
+            test_preds = model.predict(
+                loader_test,
+                climatology,
+                mask=mask,
+            )
         
         # Save results
         logger.info("Saving results")
@@ -210,9 +263,14 @@ if __name__ == '__main__':
         
         y_true = loader_test.dataset.y
 
-        print(type(y_true))
-        print(y_true.shape)
-        print(y_true)
+        if CONV_LSTM:
+            shape = test_preds.shape
+            test_preds = rearrange(test_preds, "e b c t h w -> (e b) t h w c", e=shape[0], b=shape[1], c=shape[2], t=shape[3], h=shape[4], w=shape[5])
+            
+        # print(test_preds.shape)
+
+        # print(type(y_true))
+        # print(y_true.shape)
 
         ds_result = xr.Dataset(
             data_vars=dict(
@@ -236,7 +294,7 @@ if __name__ == '__main__':
 
     logger.info(f'Finished all experiments in {((time.time() - start) / 60)} minutes')
 
-"""
+"""graph_structure
 module load StdEnv/2023
 module load gcc/12.3
 module load eccodes/2.31.0

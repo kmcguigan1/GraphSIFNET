@@ -179,12 +179,19 @@ class IceDataset(Dataset):
     def flatten_xy(self, x, y, graph_structure, mask):
         x_shape = x.shape
         x = torch.Tensor(x.reshape(x_shape[0]*x_shape[1], *x_shape[2:])).to(graph_structure['mapping'].device)  # Flatten first two dims
+        print(f"reshape x: {x.shape}")
         x = add_positional_encoding(x)
+        print(f"add pos enc x: {x.shape}")
         x = flatten(x, graph_structure['mapping'], graph_structure['n_pixels_per_node'], mask)
+        print(f"flatten x: {x.shape}")
         node_sizes = torch.Tensor(graph_structure['n_pixels_per_node']) / (graph_structure['max_cell_size']**2)
+        print(f"node_sizes: {node_sizes.shape}")
         node_sizes = node_sizes.repeat((x.shape[0], *[1]*len(node_sizes.shape)))
+        print(f"repeated node_sizes: {node_sizes.shape}")
         x = torch.cat([x, node_sizes.unsqueeze(-1)], -1)
+        print(f"x cat node_sizes: {x.shape}")
         x = np.array(x.detach().cpu()).reshape(*x_shape[:2], *x.shape[1:])  # Unflatten first two dims
+        print(f"x: {x.shape}")
         
         y_shape = y.shape
         y = torch.Tensor(y.reshape(y_shape[0]*y_shape[1], *y_shape[2:])).to(graph_structure['mapping'].device)  # Flatten first two dims
@@ -193,8 +200,13 @@ class IceDataset(Dataset):
         return x, y
     
     def flatten_xy_chunked(self, x, y, graph_structure, mask, chunk_size=100, flatten_y=True):
+    
         total_samples = len(x)
         num_chunks = (total_samples + chunk_size - 1) // chunk_size
+
+        print("")
+        print("Flatten Chunks")
+        print(f"x: {x.shape} y: {y.shape}")
 
         results_x = []
         results_y = []
@@ -203,7 +215,10 @@ class IceDataset(Dataset):
             end_idx = (i + 1) * chunk_size
             x_chunk = x[start_idx:end_idx]
             y_chunk = y[start_idx:end_idx]
+            print(f"x_chunk: {x_chunk.shape} y_chunk: {y_chunk.shape}")
+
             results_x_chunk, results_y_chunk = self.flatten_xy(x_chunk, y_chunk, graph_structure, mask)
+            print(f"results_x_chunk: {results_x_chunk.shape} results_y_chunk: {results_y_chunk.shape}")
             
             results_x.extend(np.array(results_x_chunk))
             results_y.extend(np.array(results_y_chunk))
@@ -212,3 +227,107 @@ class IceDataset(Dataset):
             return np.array(results_x), np.array(results_y)
         else:
             return results_x, y
+        
+
+from einops import rearrange
+class IceDatasetConvLSTM(Dataset):
+    def __init__(self, 
+                 ds, 
+                 years, 
+                 month, 
+                 input_timesteps,
+                 output_timesteps, 
+                 x_vars=None, 
+                 y_vars=None, 
+                 train=False, 
+                 y_binary_thresh=None, 
+                 mask=None,
+                 cache_dir=None):
+        self.train = train
+        
+        self.x, self.y, self.launch_dates = self.get_xy(
+            ds, 
+            years,
+            month, 
+            input_timesteps, 
+            output_timesteps, 
+            x_vars=x_vars, 
+            y_vars=y_vars, 
+            y_binary_thresh=y_binary_thresh, 
+            mask=mask,
+            cache_dir=cache_dir)
+        self.image_shape = (ds.latitude.size, ds.longitude.size)
+
+        # print("")
+        # print("Dataset shape")
+        # print(self.x.shape, self.y.shape)
+
+    def __len__(self):
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        return self.x[idx], self.y[idx], self.launch_dates[idx]
+    
+
+    def add_pos(self, x):
+        x_shape = x.shape
+        x = torch.Tensor(x.reshape(x_shape[0]*x_shape[1], *x_shape[2:]))  # Flatten first two dims
+        x = add_positional_encoding(x)
+        x = x.reshape(*x_shape[:-1], x_shape[-1] + 2)
+        return x
+
+    def get_xy(self, ds, years, month, input_timesteps, output_timesteps, x_vars=None, y_vars=None, y_binary_thresh=None, mask=None, cache_dir=None):
+        
+        if cache_dir is not None:
+            raise NotImplementedError('')
+
+        x, y = [], []
+        launch_dates = []
+        for year in years:
+            
+            x_vars = list(ds.data_vars) if x_vars is None else x_vars
+            y_vars = list(ds.data_vars) if y_vars is None else y_vars
+            
+            if self.train:
+                # 15 days around the month of interest
+                start_date = datetime.datetime(year, month, 1) - relativedelta(days=15)
+                end_date = datetime.datetime(year, month, 1) + relativedelta(months=1) + relativedelta(days=15)
+            else:
+                start_date = datetime.datetime(year, month, 1)
+                end_date = datetime.datetime(year, month, 1) + relativedelta(months=1)
+                
+
+            # Add buffer for input timesteps and output timesteps 
+            start_date -= relativedelta(days=input_timesteps)
+            end_date += relativedelta(days=output_timesteps-1)
+
+            # Slice dataset & normalize
+            ds_year = ds.sel(time=slice(start_date, end_date))
+            
+            # Add DOY
+            ds_year['doy'] = (('time', 'latitude', 'longitude'), ds_year.time.dt.dayofyear.values.reshape(-1, 1, 1) * np.ones(shape=(ds_year[x_vars[0]].shape)))
+            ds_year = (ds_year - ds_year.min()) / (ds_year.max() - ds_year.min())
+
+            num_samples = ds_year.time.size - output_timesteps - input_timesteps
+
+            i = 0
+            x_year = np.ndarray((num_samples, input_timesteps, ds.latitude.size, ds.longitude.size, len(x_vars)), dtype='float32')
+            y_year = np.ndarray((num_samples, output_timesteps, ds.latitude.size, ds.longitude.size, len(y_vars)), dtype='float32')
+            while i + output_timesteps + input_timesteps < ds_year.time.size:
+                x_year[i] = np.moveaxis(np.nan_to_num(ds_year[x_vars].isel(time=slice(i, i+input_timesteps)).to_array().to_numpy()), 0, -1).astype('float32')
+                y_year[i] = np.moveaxis(np.nan_to_num(ds_year[y_vars].isel(time=slice(i+input_timesteps, i+input_timesteps+output_timesteps)).to_array().to_numpy()), 0, -1).astype('float32')
+                i += 1
+
+            x.append(x_year)
+            y.append(y_year)
+            launch_dates.append(ds_year.time[input_timesteps:-output_timesteps].values)
+
+        x, y, launch_dates = np.concatenate(x, 0), np.concatenate(y, 0), np.concatenate(launch_dates, 0)
+        x = self.add_pos(x)
+
+        launch_dates = launch_dates.astype(int)
+     
+        if y_binary_thresh is not None:
+            y = y > y_binary_thresh
+
+        return x, y, launch_dates
