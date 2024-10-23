@@ -9,6 +9,12 @@ import torch
 
 import numpy as np
 
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger()
+
 def get_positional_encoding(position, d_model):
     """
     Compute positional encoding for a given position and model depth (d_model).

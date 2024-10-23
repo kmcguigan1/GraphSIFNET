@@ -52,24 +52,11 @@ if __name__ == '__main__':
 
     # CLI arguments
     parser = argparse.ArgumentParser()
-    # parser.add_argument('--month', nargs='?', default=5, type=int)
-    # parser.add_argument('--n_epochs_init', nargs='?', default=30, type=int)
-    # parser.add_argument('--n_epochs_retrain', nargs='?', default=10, type=int)
-    # parser.add_argument('--hidden_size', nargs='?', default=32, type=int)
-    # parser.add_argument('--n_conv', nargs='?', default=3, type=int)
-    # parser.add_argument('--input_timesteps', nargs='?', default=10, type=int)
-    # parser.add_argument('--output_timesteps', nargs='?', default=90, type=int)
-    # parser.add_argument('--mesh_size', nargs='?', default=4, type=int)
-    # parser.add_argument('--mesh_type', nargs='?', default='homogeneous', type=str)
-    # parser.add_argument('--conv_type', nargs='?', default='GCNConv', type=str)
-    # parser.add_argument('--directory', nargs='?', default='experiment', type=str)
-    # parser.add_argument('--rnn_type', nargs='?', default='NoConvLSTM', type=str)
-
     parser.add_argument('--month', nargs='?', default=5, type=int)
-    parser.add_argument('--n_epochs_init', nargs='?', default=1, type=int)
-    parser.add_argument('--n_epochs_retrain', nargs='?', default=1, type=int)
-    parser.add_argument('--hidden_size', nargs='?', default=4, type=int)
-    parser.add_argument('--n_conv', nargs='?', default=1, type=int)
+    parser.add_argument('--n_epochs_init', nargs='?', default=30, type=int)
+    parser.add_argument('--n_epochs_retrain', nargs='?', default=10, type=int)
+    parser.add_argument('--hidden_size', nargs='?', default=32, type=int)
+    parser.add_argument('--n_conv', nargs='?', default=3, type=int)
     parser.add_argument('--input_timesteps', nargs='?', default=10, type=int)
     parser.add_argument('--output_timesteps', nargs='?', default=90, type=int)
     parser.add_argument('--mesh_size', nargs='?', default=4, type=int)
@@ -77,6 +64,19 @@ if __name__ == '__main__':
     parser.add_argument('--conv_type', nargs='?', default='GCNConv', type=str)
     parser.add_argument('--directory', nargs='?', default='experiment', type=str)
     parser.add_argument('--rnn_type', nargs='?', default='NoConvLSTM', type=str)
+
+    # parser.add_argument('--month', nargs='?', default=5, type=int)
+    # parser.add_argument('--n_epochs_init', nargs='?', default=1, type=int)
+    # parser.add_argument('--n_epochs_retrain', nargs='?', default=1, type=int)
+    # parser.add_argument('--hidden_size', nargs='?', default=4, type=int)
+    # parser.add_argument('--n_conv', nargs='?', default=1, type=int)
+    # parser.add_argument('--input_timesteps', nargs='?', default=10, type=int)
+    # parser.add_argument('--output_timesteps', nargs='?', default=90, type=int)
+    # parser.add_argument('--mesh_size', nargs='?', default=4, type=int)
+    # parser.add_argument('--mesh_type', nargs='?', default='homogeneous', type=str)
+    # parser.add_argument('--conv_type', nargs='?', default='GCNConv', type=str)
+    # parser.add_argument('--directory', nargs='?', default='experiment', type=str)
+    # parser.add_argument('--rnn_type', nargs='?', default='NoConvLSTM', type=str)
     
     args = vars(parser.parse_args())
     logger.info(f'Arguments: {args}')
@@ -93,7 +93,7 @@ if __name__ == '__main__':
     conv_type = args['conv_type']
     directory = args['directory']
 
-    directory = directory + "_test_and_delete"
+    # directory = directory + "_test_and_delete"
 
     # Defaults
     lr = 0.0001
@@ -106,9 +106,9 @@ if __name__ == '__main__':
     # rnn_type = 'NoConvLSTM'  # LSTM, GRU, 
     rnn_type = args['rnn_type']
     
-    cache_dir = '/home/kmcguiga/projects/def-sirisha/kmcguiga/GraphSIFNET/data_cache'
+    cache_dir = None #'/home/kmcguiga/projects/def-sirisha/kmcguiga/GraphSIFNET/data_cache'
     
-    test = True
+    test = False
     
     if test:
         cache_dir = None
@@ -212,7 +212,6 @@ if __name__ == '__main__':
 
         print(type(y_true))
         print(y_true.shape)
-        print(y_true)
 
         ds_result = xr.Dataset(
             data_vars=dict(
