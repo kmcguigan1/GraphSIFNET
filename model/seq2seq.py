@@ -665,17 +665,17 @@ class Seq2Seq(torch.nn.Module):
 
 
 class ConvLSTMCell(nn.Module):
-    def __init__(self, in_dims, hidden_dims, kernel_size=5):
+    def __init__(self, in_dims, hidden_dims, kernel_size=3):
         super().__init__()
         self.hidden = hidden_dims
 
         self.ix = nn.Conv2d(in_dims, hidden_dims, kernel_size, padding="same", bias=True)
         self.ih = nn.Conv2d(hidden_dims, hidden_dims, kernel_size, padding="same", bias=False)
-        self.ic = nn.Conv2d(hidden_dims, hidden_dims, 1, padding="same", bias=False)
+        # self.ic = nn.Conv2d(hidden_dims, hidden_dims, 1, padding="same", bias=False)
 
         self.fx = nn.Conv2d(in_dims, hidden_dims, kernel_size, padding="same", bias=True)
         self.fh = nn.Conv2d(hidden_dims, hidden_dims, kernel_size, padding="same", bias=False)
-        self.fc = nn.Conv2d(hidden_dims, hidden_dims, 1, padding="same", bias=False)
+        # self.fc = nn.Conv2d(hidden_dims, hidden_dims, 1, padding="same", bias=False)
 
         self.ox = nn.Conv2d(in_dims, hidden_dims, kernel_size, padding="same", bias=True)
         self.oh = nn.Conv2d(hidden_dims, hidden_dims, kernel_size, padding="same", bias=False)
@@ -688,31 +688,44 @@ class ConvLSTMCell(nn.Module):
         self.h = torch.zeros(B, self.hidden, H, W, device=device, dtype=dtype)
         self.c = torch.zeros(B, self.hidden, H, W, device=device, dtype=dtype)
 
-    def get_states(self):
-        return self.h, self.c
+    # def get_states(self):
+    #     return self.h, self.c
     
-    def update_states(self, h, c):
-        self.h, self.c = self.h.clone(), self.c.clone()
-        self.h, self.c = h, c
+    # def update_states(self, h, c):
+    #     self.h.clone()
+    #     self.c.clone()
+    #     self.h, self.c = h, c
+
+    # def forward(self, x):
+    #     # h, c = self.get_states()
+    #     igate = F.sigmoid(self.ix(x) + self.ih(h))# + self.ic(c))
+    #     fgate = F.sigmoid(self.fx(x) + self.fh(h))# + self.fc(c))
+
+    #     context = F.tanh(self.cx(x) + self.ch(h))
+    #     c_new = fgate * c + igate * context
+        
+    #     ogate = F.sigmoid(self.ox(x) + self.oh(h) + self.oc(c_new))
+    #     h_new = ogate * F.tanh(c_new)
+        
+    #     # self.update_states(h_new, c_new)
+    #     return h_new
 
     def forward(self, x):
-        h, c = self.get_states()
-        igate = F.sigmoid(self.ix(x) + self.ih(h) + self.ic(c))
-        fgate = F.sigmoid(self.fx(x) + self.fh(h) + self.fc(c))
+        # h, c = self.get_states()
+        igate = F.sigmoid(self.ix(x) + self.ih(self.h))# + self.ic(c))
+        fgate = F.sigmoid(self.fx(x) + self.fh(self.h))# + self.fc(c))
 
-        context = F.tanh(self.cx(x) + self.ch(h))
-        c_new = fgate * c + igate * context
+        context = F.tanh(self.cx(x) + self.ch(self.h))
+        self.c = fgate * self.c + igate * context
         
-        ogate = F.sigmoid(self.ox(x) + self.oh(h) + self.oc(c_new))
-        h_new = ogate * F.tanh(c_new)
-        
-        self.update_states(h_new, c_new)
-        return h_new
+        ogate = F.sigmoid(self.ox(x) + self.oh(self.h) + self.oc(self.c))
+        self.h = ogate * F.tanh(self.c)
+        return self.h
 
 class ConvLSTM(torch.nn.Module):
     def __init__(
         self, hidden_size, input_timesteps=3, input_features=4, output_timesteps=5,
-        n_layers=4, binary=False, device=None, debug=False, multitask=True
+        n_layers=2, binary=False, device=None, debug=False, multitask=True
     ):
         super().__init__()
         assert binary == False
@@ -751,7 +764,9 @@ class ConvLSTM(torch.nn.Module):
                 z = layer(z)
         
         for idx in range(len(self.encoders)):
-            self.decoders[idx].update_states(*self.encoders[idx].get_states())
+            # self.decoders[idx].update_states(*self.encoders[idx].get_states())
+            self.decoders[idx].h = self.encoders[idx].h
+            self.decoders[idx].c = self.encoders[idx].c
 
         predictions = torch.zeros(B, 2, self.output_timesteps, H, W, device=x.device, dtype=x.dtype)
         last_sic = x[:, :1, -1, ...]

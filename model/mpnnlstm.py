@@ -1,3 +1,4 @@
+import gc
 import numpy as np
 import time
 import pandas as pd
@@ -847,36 +848,38 @@ class NextFramePredictorConvLSTM(NextFramePredictor):
             running_loss_test = 0
             step_test = 0
             self.model.eval()
-            for x, y, launch_date in tqdm(loader_test, leave=True):
+            with torch.no_grad():
+                for x, y, launch_date in tqdm(loader_test, leave=True):
 
-                x = x.type(torch.float32)
-                y = y.type(torch.float32)
-                x, y = x.to(self.device), y.to(self.device)
-                
-                if climatology is not None:
-                    concat_layers = self.get_climatology_array(climatology, launch_date)
-                    concat_layers = concat_layers.type(torch.float32)
-                else:
-                    concat_layers = None
-                
-                x = rearrange(x, "b t h w c -> b c t h w", b=1, t=x.size(1), h=image_shape[0], w=image_shape[1], c=x.size(-1))
-                y = rearrange(y, "b t h w c -> b c t h w", b=1, t=y.size(1), h=image_shape[0], w=image_shape[1], c=y.size(-1))
-                concat_layers = rearrange(concat_layers, "t h w (b c) -> b c t h w", b=1, t=concat_layers.size(0), h=image_shape[0], w=image_shape[1], c=1)
+                    x = x.type(torch.float32)
+                    y = y.type(torch.float32)
+                    x, y = x.to(self.device), y.to(self.device)
+                    
+                    if climatology is not None:
+                        concat_layers = self.get_climatology_array(climatology, launch_date)
+                        concat_layers = concat_layers.type(torch.float32)
+                    else:
+                        concat_layers = None
+                    
+                    x = rearrange(x, "b t h w c -> b c t h w", b=1, t=x.size(1), h=image_shape[0], w=image_shape[1], c=x.size(-1))
+                    y = rearrange(y, "b t h w c -> b c t h w", b=1, t=y.size(1), h=image_shape[0], w=image_shape[1], c=y.size(-1))
+                    concat_layers = rearrange(concat_layers, "t h w (b c) -> b c t h w", b=1, t=concat_layers.size(0), h=image_shape[0], w=image_shape[1], c=1)
 
-                # print("")
-                # print(f"x: {x.shape} y: {y.shape}")
-                # print("climateology: ", concat_layers.shape)
+                    # print("")
+                    # print(f"x: {x.shape} y: {y.shape}")
+                    # print("climateology: ", concat_layers.shape)
 
-                y_hat = self.model(x, concat_layers)
-                # print(f"y_hat: {y_hat.shape}")
+                    y_hat = self.model(x, concat_layers)
+                    # print(f"y_hat: {y_hat.shape}")
 
-                loss = self.loss_func(y_hat, y)  
+                    loss = self.loss_func(y_hat, y)  
 
-                step_test += 1
-                running_loss_test += loss
+                    step_test += 1
+                    running_loss_test += loss.item()
 
-                del y_hat
-                torch.cuda.empty_cache()
+                    del x, y, y_hat, concat_layers
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
 
             running_loss = running_loss / (step + 1)
@@ -886,21 +889,21 @@ class NextFramePredictorConvLSTM(NextFramePredictor):
                 self.save()
                 self.min_loss = running_loss_test
 
-            if np.isnan(running_loss_test.item()):
+            if np.isnan(running_loss_test):
                 raise ValueError('NaN loss :(')
 
-            # if running_loss_test.item() > 4:
+            # if running_loss_test > 4:
             #     raise ValueError('Diverged :(')
 
-            self.writer.add_scalar("Loss/test", running_loss_test.item(), epoch)
+            self.writer.add_scalar("Loss/test", running_loss_test, epoch)
 
             self.scheduler.step()
 
             self.train_loss.append(running_loss)
-            self.test_loss.append(running_loss_test.item())
+            self.test_loss.append(running_loss_test)
             
             print(f"{self.experiment_name} | Epoch {epoch} train {self.loss_func_name}: {running_loss:.4f}, "+ \
-                f"test {self.loss_func_name}: {running_loss_test.item():.4f}, lr: {self.scheduler.get_last_lr()[0]:.4f}, time_per_epoch: {(time.time() - st) / (epoch+1):.1f}")
+                f"test {self.loss_func_name}: {running_loss_test:.4f}, lr: {self.scheduler.get_last_lr()[0]:.4f}, time_per_epoch: {(time.time() - st) / (epoch+1):.1f}")
         
         print(f'Finished in {(time.time() - st)/60} minutes')
         
@@ -935,34 +938,35 @@ class NextFramePredictorConvLSTM(NextFramePredictor):
         self.model.to(self.device)
         
         y_pred = []
-        for x, y, launch_date in tqdm(loader, leave=False):
+        with torch.no_grad():
+            for x, y, launch_date in tqdm(loader, leave=False):
 
-            x = x.type(torch.float32)
-            y = y.type(torch.float32)
-            x, y = x.to(self.device), y.to(self.device)
-            
-            if climatology is not None:
-                concat_layers = self.get_climatology_array(climatology, launch_date)
-                concat_layers = concat_layers.type(torch.float32)
-            else:
-                concat_layers = None
-            
-            x = rearrange(x, "b t h w c -> b c t h w", b=1, t=x.size(1), h=image_shape[0], w=image_shape[1], c=x.size(-1))
-            y = rearrange(y, "b t h w c -> b c t h w", b=1, t=y.size(1), h=image_shape[0], w=image_shape[1], c=y.size(-1))
-            concat_layers = rearrange(concat_layers, "t h w (b c) -> b c t h w", b=1, t=concat_layers.size(0), h=image_shape[0], w=image_shape[1], c=1)
+                x = x.type(torch.float32)
+                y = y.type(torch.float32)
+                x, y = x.to(self.device), y.to(self.device)
+                
+                if climatology is not None:
+                    concat_layers = self.get_climatology_array(climatology, launch_date)
+                    concat_layers = concat_layers.type(torch.float32)
+                else:
+                    concat_layers = None
+                
+                x = rearrange(x, "b t h w c -> b c t h w", b=1, t=x.size(1), h=image_shape[0], w=image_shape[1], c=x.size(-1))
+                y = rearrange(y, "b t h w c -> b c t h w", b=1, t=y.size(1), h=image_shape[0], w=image_shape[1], c=y.size(-1))
+                concat_layers = rearrange(concat_layers, "t h w (b c) -> b c t h w", b=1, t=concat_layers.size(0), h=image_shape[0], w=image_shape[1], c=1)
 
-            # print("")
-            # print(f"x: {x.shape} y: {y.shape}")
-            # print("climateology: ", concat_layers.shape)
+                # print("")
+                # print(f"x: {x.shape} y: {y.shape}")
+                # print("climateology: ", concat_layers.shape)
 
-            y_hat = self.model(x, concat_layers)
-            # print(f"y_hat: {y_hat.shape}")
+                y_hat = self.model(x, concat_layers)
+                # print(f"y_hat: {y_hat.shape}")
 
-            y_hat = y_hat.detach().cpu()
+                y_hat = y_hat.detach().cpu()
 
-            y_pred.append(y_hat)
-            torch.cuda.empty_cache()
-            
+                y_pred.append(y_hat)
+                torch.cuda.empty_cache()
+                
         y_pred = np.stack(y_pred, 0)
         # print(y_pred.shape)
         return y_pred

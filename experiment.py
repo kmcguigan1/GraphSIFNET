@@ -40,7 +40,7 @@ def create_datasets(ds, train_years, month, input_timesteps, output_timesteps, x
         data_test = IceDatasetConvLSTM(ds, test_years, month, input_timesteps, output_timesteps, x_vars, y_vars, mask=mask)
 
     loader_train = DataLoader(data_train, batch_size=1, shuffle=True)
-    loader_val = DataLoader(data_val, batch_size=1, shuffle=True)
+    loader_val = DataLoader(data_val, batch_size=1, shuffle=False)
     loader_test = DataLoader(data_test, batch_size=1, shuffle=False)
 
     return loader_train, loader_val, loader_test
@@ -76,10 +76,14 @@ if __name__ == '__main__':
     parser.add_argument('--month', nargs='?', default=5, type=int)
     parser.add_argument('--n_epochs_init', nargs='?', default=30, type=int)
     parser.add_argument('--n_epochs_retrain', nargs='?', default=10, type=int)
+
+    # parser.add_argument('--n_epochs_init', nargs='?', default=2, type=int)
+    # parser.add_argument('--n_epochs_retrain', nargs='?', default=1, type=int)
+
     parser.add_argument('--hidden_size', nargs='?', default=32, type=int)
     parser.add_argument('--n_conv', nargs='?', default=2, type=int)
     parser.add_argument('--input_timesteps', nargs='?', default=10, type=int)
-    parser.add_argument('--output_timesteps', nargs='?', default=90, type=int)
+    parser.add_argument('--output_timesteps', nargs='?', default=30, type=int)
     parser.add_argument('--mesh_size', nargs='?', default=1, type=int)
     parser.add_argument('--mesh_type', nargs='?', default='homogeneous', type=str)
     parser.add_argument('--conv_type', nargs='?', default='TransformerConv', type=str)
@@ -101,7 +105,7 @@ if __name__ == '__main__':
     conv_type = args['conv_type']
     directory = args['directory']
 
-    directory = directory + "_test_and_delete"
+    # directory = directory + "_test_and_delete"
 
     # Defaults
     lr = 0.0001
@@ -132,6 +136,7 @@ if __name__ == '__main__':
     if test:
         ds = ds.isel(latitude=slice(100, 125), longitude=slice(200, 225))
     
+    print(ds)
     mask = np.isnan(ds.siconc.isel(time=0)).values
 
     image_shape = mask.shape
